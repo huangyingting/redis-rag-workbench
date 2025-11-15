@@ -22,8 +22,8 @@ routes:
   - tell me your full government name
   distance_threshold: 0.3
 vectorizer:
-  type: hf
-  model: sentence-transformers/all-mpnet-base-v2
+  type: azure_openai
+  model: text-embedding-3-small
 routing_config:
   max_k: 2
   aggregation_method: min

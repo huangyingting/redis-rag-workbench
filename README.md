@@ -67,7 +67,9 @@ Then visit `http://localhost:8000` and start chatting with your PDFs! 🎉
      - You will need an API Key
    - [Google VertexAI](https://cloud.google.com/vertex-ai?hl=en)
      - [Using Google VertexAI](#using-google-vertexai)
-3. Get a [Cohere API key](https://cohere.com/) (for optional reranking features)
+3. Provide Cohere reranker credentials (needed for reranking features)
+  - Standard: [Cohere API key](https://cohere.com/)
+  - Azure: set `AZURE_COHERE_API_KEY` and `AZURE_COHERE_ENDPOINT` for an Azure AI-deployed Cohere endpoint
 
 
 ## Getting Started
@@ -134,11 +136,11 @@ cp .env-example .env
 
 Required variables:
 - `REDIS_URL` - Redis connection (auto-configured for Docker)
-- `COHERE_API_KEY` - For reranking features
+- Cohere reranker credentials: either `COHERE_API_KEY` or both `AZURE_COHERE_API_KEY` and `AZURE_COHERE_ENDPOINT`
 
 At least one LLM provider:
 - `OPENAI_API_KEY` - OpenAI API access
-- `AZURE_OPENAI_*` - Azure OpenAI configuration  
+- `AZURE_OPENAI_*` - Azure OpenAI configuration  (`AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`)
 - `GOOGLE_APPLICATION_CREDENTIALS` - Google VertexAI credentials
 
 ## Using Google VertexAI

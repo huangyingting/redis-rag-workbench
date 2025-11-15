@@ -24,6 +24,11 @@ from ragas.metrics import answer_relevancy, faithfulness
 from redisvl.extensions.llmcache import SemanticCache
 from redisvl.extensions.router import SemanticRouter
 from redisvl.utils.rerank import CohereReranker, HFCrossEncoderReranker
+from redisvl.utils.vectorize import (
+    AzureOpenAITextVectorizer,
+    HFTextVectorizer,
+    OpenAITextVectorizer,
+)
 from redisvl.utils.utils import create_ulid
 
 from workbench.shared.cached_llm import CachedLLM
@@ -55,6 +60,8 @@ class ChatApp:
         self.redis_url = os.environ.get("REDIS_URL")
         self.openai_api_key = os.environ.get("OPENAI_API_KEY")
         self.cohere_api_key = os.environ.get("COHERE_API_KEY")
+        self.azure_cohere_api_key = os.environ.get("AZURE_COHERE_API_KEY")
+        self.azure_cohere_endpoint = os.environ.get("AZURE_COHERE_ENDPOINT")
 
         self.azure_openai_api_version = os.environ.get(
             "AZURE_OPENAI_API_VERSION"
@@ -64,18 +71,18 @@ class ChatApp:
         )  # ex: 1234567890abcdef
         self.azure_openai_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
         self.azure_openai_deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT")
+        self.azure_openai_embedding_deployment = os.environ.get(
+            "AZURE_OPENAI_EMBEDDING_DEPLOYMENT"
+        )
 
         self.gcloud_credentials = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
         self.gcloud_project_id = os.environ.get("GOOGLE_CLOUD_PROJECT_ID")
 
-        required_vars = {
-            "REDIS_URL": os.environ.get("REDIS_URL"),
-            "COHERE_API_KEY": os.environ.get("COHERE_API_KEY"),
-        }
+        required_vars = {"REDIS_URL": self.redis_url}
 
         missing_vars = {k: v for k, v in required_vars.items() if not v}
 
-        if missing_vars:
+        if missing_vars or not self._cohere_credentials_available():
             self.credentials_set = False
         else:
             self.credentials_set = True
@@ -130,32 +137,41 @@ class ChatApp:
         if self.openai_api_key is not None:
             self.available_embedding_models[LLMs.openai] = openai_embedding_models()
 
-        if self.azure_openai_deployment is not None:
-            self.available_embedding_models[LLMs.azure] = openai_embedding_models()
+        if self.azure_openai_embedding_deployment is not None:
+            self.available_embedding_models[LLMs.azure] = [
+                self.azure_openai_embedding_deployment
+            ]
 
         if self.gcloud_credentials is not None:
             self.available_embedding_models[LLMs.vertexai] = vertex_embedding_models()
 
         self.embedding_model_providers = list(self.available_embedding_models.keys())
-
         if LLMs.openai in self.llm_model_providers:
             self.selected_llm_provider = LLMs.openai
             self.selected_llm = default_openai_model()
-            self.selected_embedding_model_provider = LLMs.openai
-            self.selected_embedding_model = default_openai_embedding_model()
         elif LLMs.azure in self.llm_model_providers:
             self.selected_llm_provider = LLMs.azure
             self.selected_llm = self.azure_openai_deployment
-            self.selected_embedding_model_provider = LLMs.azure
-            self.selected_embedding_model = default_openai_embedding_model()
         elif LLMs.vertexai in self.llm_model_providers:
             self.selected_llm_provider = LLMs.vertexai
             self.selected_llm = default_vertex_model()
+        else:
+            raise Exception(
+                "You need to specify credentials for either OpenAI, Azure, or Google Cloud"
+            )
+
+        if LLMs.openai in self.embedding_model_providers:
+            self.selected_embedding_model_provider = LLMs.openai
+            self.selected_embedding_model = default_openai_embedding_model()
+        elif LLMs.azure in self.embedding_model_providers:
+            self.selected_embedding_model_provider = LLMs.azure
+            self.selected_embedding_model = self.azure_openai_embedding_deployment
+        elif LLMs.vertexai in self.embedding_model_providers:
             self.selected_embedding_model_provider = LLMs.vertexai
             self.selected_embedding_model = default_vertex_embedding_model()
         else:
             raise Exception(
-                "You need to specify credentials for either OpenAI, Azure, or Google Cloud"
+                "You need to specify embedding credentials for OpenAI, Azure, or Google Cloud"
             )
 
         self.llm = None
@@ -164,6 +180,67 @@ class ChatApp:
         self.vector_store = None
         self.llmcache = None
         self.index_name = None
+
+    def _has_azure_cohere(self) -> bool:
+        return bool(self.azure_cohere_api_key and self.azure_cohere_endpoint)
+
+    def _cohere_credentials_available(self) -> bool:
+        return bool(self.cohere_api_key) or self._has_azure_cohere()
+
+    def _normalized_azure_cohere_endpoint(self) -> Optional[str]:
+        if not self.azure_cohere_endpoint:
+            return None
+        return self.azure_cohere_endpoint.rstrip("/")
+
+    def _cohere_reranker_params(self) -> tuple[Optional[str], dict]:
+        if self._has_azure_cohere():
+            base_url = self._normalized_azure_cohere_endpoint()
+            client_kwargs = {}
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            return self.azure_cohere_api_key, client_kwargs
+        if self.cohere_api_key:
+            return self.cohere_api_key, {}
+        return None, {}
+
+    def _semantic_cache_vectorizer(self):
+        provider = self.selected_embedding_model_provider
+        try:
+            if provider == LLMs.azure:
+                if not all(
+                    [
+                        self.azure_openai_api_key,
+                        self.azure_openai_api_version,
+                        self.azure_openai_endpoint,
+                    ]
+                ):
+                    raise ValueError(
+                        "Azure OpenAI credentials are required for semantic cache vectorizer"
+                    )
+                return AzureOpenAITextVectorizer(
+                    model=self.selected_embedding_model,
+                    api_config={
+                        "api_key": self.azure_openai_api_key,
+                        "api_version": self.azure_openai_api_version,
+                        "azure_endpoint": self.azure_openai_endpoint,
+                    },
+                )
+
+            if provider == LLMs.openai:
+                if not self.openai_api_key:
+                    raise ValueError("OPENAI_API_KEY must be set for semantic cache")
+                return OpenAITextVectorizer(
+                    model=self.selected_embedding_model,
+                    api_config={"api_key": self.openai_api_key},
+                )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to configure semantic cache vectorizer for %s: %s. Falling back to default.",
+                provider,
+                exc,
+            )
+
+        return HFTextVectorizer(model="redis/langcache-embed-v1")
 
     def initialize(self):
         if self.credentials_set:
@@ -188,20 +265,37 @@ class ChatApp:
 
         # Initialize rerankers
         logger.info("Initializing rerankers")
-        self.RERANKERS = {
-            "HuggingFace": HFCrossEncoderReranker("BAAI/bge-reranker-base"),
-            "Cohere": CohereReranker(
-                limit=3, api_config={"api_key": self.cohere_api_key}
-            ),
-        }
+        self.RERANKERS = {}
+
+        cohere_api_key, cohere_client_kwargs = self._cohere_reranker_params()
+        if cohere_api_key:
+            logger.info(
+                "Enabling Cohere reranker via %s credentials",
+                "Azure" if self._has_azure_cohere() else "Cohere",
+            )
+            self.RERANKERS["Cohere"] = CohereReranker(
+                limit=3,
+                api_config={"api_key": cohere_api_key},
+                **cohere_client_kwargs,
+            )
+        else:
+            logger.info("Cohere credentials missing. Falling back to HuggingFace reranker.")
+            self.RERANKERS["HuggingFace"] = HFCrossEncoderReranker(
+                "BAAI/bge-reranker-base"
+            )
+
         logger.info("Rerankers initialized")
 
-        # Init semantic router
-        logger.info("Initializing semantic router")
-        self.semantic_router = SemanticRouter.from_yaml(
-            "workbench/router.yaml", redis_url=self.redis_url, overwrite=True
-        )
-        logger.info("Semantic router initialized")
+        # Init semantic router only if enabled
+        if self.use_semantic_router:
+            logger.info("Initializing semantic router")
+            self.semantic_router = SemanticRouter.from_yaml(
+                "workbench/router.yaml", redis_url=self.redis_url, overwrite=True
+            )
+            logger.info("Semantic router initialized")
+        else:
+            self.semantic_router = None
+            logger.info("Semantic router disabled")
 
         # Init chat history if use_chat_history is True
         if self.use_chat_history:
@@ -229,17 +323,35 @@ class ChatApp:
 
         return {"session_id": self.session_id, "chat_history": self.chat_history}
 
-    def set_credentials(self, redis_url, openai_key, cohere_key):
+    def set_credentials(
+        self,
+        redis_url,
+        openai_key,
+        cohere_key,
+        azure_cohere_key,
+        azure_cohere_endpoint,
+    ):
         self.redis_url = redis_url or self.redis_url
         self.openai_api_key = openai_key or self.openai_api_key
         self.cohere_api_key = cohere_key or self.cohere_api_key
+        self.azure_cohere_api_key = azure_cohere_key or self.azure_cohere_api_key
+        self.azure_cohere_endpoint = (
+            azure_cohere_endpoint or self.azure_cohere_endpoint
+        )
 
         # Update environment variables
-        os.environ["REDIS_URL"] = self.redis_url
-        os.environ["OPENAI_API_KEY"] = self.openai_api_key
-        os.environ["COHERE_API_KEY"] = self.cohere_api_key
+        if self.redis_url:
+            os.environ["REDIS_URL"] = self.redis_url
+        if self.openai_api_key:
+            os.environ["OPENAI_API_KEY"] = self.openai_api_key
+        if self.cohere_api_key:
+            os.environ["COHERE_API_KEY"] = self.cohere_api_key
+        if self.azure_cohere_api_key:
+            os.environ["AZURE_COHERE_API_KEY"] = self.azure_cohere_api_key
+        if self.azure_cohere_endpoint:
+            os.environ["AZURE_COHERE_ENDPOINT"] = self.azure_cohere_endpoint
 
-        self.credentials_set = all([self.redis_url, self.cohere_api_key])
+        self.credentials_set = bool(self.redis_url) and self._cohere_credentials_available()
 
         if self.credentials_set:
             self.initialize_components()
@@ -428,10 +540,12 @@ class ChatApp:
 
     def make_semantic_cache(self) -> SemanticCache:
         semantic_cache_index_name = f"llmcache:{self.index_name}"
+        vectorizer = self._semantic_cache_vectorizer()
         return SemanticCache(
             name=semantic_cache_index_name,
             redis_url=self.redis_url,
             distance_threshold=self.distance_threshold,
+            vectorizer=vectorizer,
         )
 
     def clear_semantic_cache(self):

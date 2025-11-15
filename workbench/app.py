@@ -372,6 +372,11 @@ def update_embedding_model_options(selected_embedding_model_provider):
         match selected_embedding_model_provider:
             case LLMs.vertexai:
                 app.selected_embedding_model = default_vertex_embedding_model()
+            case LLMs.azure:
+                app.selected_embedding_model = (
+                    app.azure_openai_embedding_deployment
+                    or default_openai_embedding_model()
+                )
             case _:
                 app.selected_embedding_model = default_openai_embedding_model()
 
@@ -429,6 +434,15 @@ def ui():
             )
             cohere_key_input = gr.Textbox(
                 label="COHERE_API_KEY", type="password", value=app.cohere_api_key or ""
+            )
+            azure_cohere_key_input = gr.Textbox(
+                label="AZURE_COHERE_API_KEY",
+                type="password",
+                value=app.azure_cohere_api_key or "",
+            )
+            azure_cohere_endpoint_input = gr.Textbox(
+                label="AZURE_COHERE_ENDPOINT",
+                value=app.azure_cohere_endpoint or "",
             )
             credentials_status = gr.Markdown("Please enter the missing credentials.")
             submit_credentials_btn = gr.Button("Submit Credentials")
@@ -750,7 +764,13 @@ def ui():
 
         submit_credentials_btn.click(
             fn=app.set_credentials,
-            inputs=[redis_url_input, openai_key_input, cohere_key_input],
+            inputs=[
+                redis_url_input,
+                openai_key_input,
+                cohere_key_input,
+                azure_cohere_key_input,
+                azure_cohere_endpoint_input,
+            ],
             outputs=credentials_status,
         ).then(
             fn=check_credentials,
