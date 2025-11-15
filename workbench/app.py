@@ -513,10 +513,14 @@ def ui():
                         use_reranker = gr.Checkbox(
                             label="Use Reranker", value=app.use_rerankers
                         )
+                        reranker_choices = app.get_reranker_choices()
+                        reranker_default = None
+                        if reranker_choices:
+                            reranker_default = app.reranker_type or reranker_choices[0]
                         reranker_type = gr.Dropdown(
-                            choices=list(app.rerankers().keys()),
+                            choices=reranker_choices,
                             label="Reranker Type",
-                            value="HuggingFace",
+                            value=reranker_default,
                             interactive=True,
                         )
 
@@ -747,6 +751,18 @@ def ui():
             outputs=[],
         )
 
+        use_reranker.change(
+            fn=app.update_reranker_usage,
+            inputs=[use_reranker],
+            outputs=[],
+        )
+
+        reranker_type.change(
+            fn=app.update_reranker_type,
+            inputs=[reranker_type],
+            outputs=[],
+        )
+
         def check_credentials():
             if not app.credentials_set:
                 return gr.update(visible=True)
@@ -776,7 +792,9 @@ def ui():
             fn=check_credentials,
             outputs=credentials_modal,
         ).then(
-            fn=lambda: gr.update(choices=app.get_reranker_choices()),
+            fn=lambda: gr.update(
+                choices=app.get_reranker_choices(), value=app.reranker_type
+            ),
             outputs=reranker_type,
         ).then(
             fn=update_components_state,

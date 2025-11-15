@@ -23,7 +23,11 @@ routes:
   distance_threshold: 0.3
 vectorizer:
   type: azure_openai
-  model: text-embedding-3-small
+  model: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT}
+  api_config:
+    azure_endpoint: ${AZURE_OPENAI_ENDPOINT}
+    api_key: ${AZURE_OPENAI_API_KEY}
+    api_version: ${AZURE_OPENAI_API_VERSION}
 routing_config:
   max_k: 2
   aggregation_method: min

@@ -1,6 +1,7 @@
 import json
 import os
 import os.path
+from string import Template
 from typing import Any, List, Optional
 
 import gradio as gr
@@ -24,10 +25,12 @@ from ragas.metrics import answer_relevancy, faithfulness
 from redisvl.extensions.llmcache import SemanticCache
 from redisvl.extensions.router import SemanticRouter
 from redisvl.utils.rerank import CohereReranker, HFCrossEncoderReranker
+import yaml
 from redisvl.utils.vectorize import (
     AzureOpenAITextVectorizer,
     HFTextVectorizer,
     OpenAITextVectorizer,
+    vectorizer_from_dict,
 )
 from redisvl.utils.utils import create_ulid
 
@@ -89,6 +92,7 @@ class ChatApp:
 
         self.initialized = False
         self.RERANKERS = {}
+        self.reranker_type = None
 
         # Initialize non-API dependent variables
         self.chunk_size = int(os.environ.get("DEFAULT_CHUNK_SIZE", 500))
@@ -180,6 +184,7 @@ class ChatApp:
         self.vector_store = None
         self.llmcache = None
         self.index_name = None
+        self.semantic_router = None
 
     def _has_azure_cohere(self) -> bool:
         return bool(self.azure_cohere_api_key and self.azure_cohere_endpoint)
@@ -202,6 +207,43 @@ class ChatApp:
         if self.cohere_api_key:
             return self.cohere_api_key, {}
         return None, {}
+
+    def _load_router_config(self, path: str) -> dict:
+        with open(path, "r", encoding="utf-8") as file:
+            template = Template(file.read())
+        try:
+            resolved = template.substitute(os.environ)
+        except KeyError as exc:  # pragma: no cover - configuration guard
+            raise ValueError(
+                f"Missing environment variable {exc} required by router.yaml"
+            ) from exc
+
+        data = yaml.safe_load(resolved)
+        if not isinstance(data, dict):
+            raise ValueError("Router configuration must be a mapping")
+        return data
+
+    def _build_router_vectorizer(self, vectorizer_config: dict):
+        if not vectorizer_config:
+            return None
+
+        vectorizer_type = vectorizer_config.get("type")
+        api_config = vectorizer_config.get("api_config")
+
+        if vectorizer_type == "azure_openai":
+            effective_config = api_config or {}
+            if not effective_config:
+                effective_config = {
+                    "api_key": self.azure_openai_api_key,
+                    "api_version": self.azure_openai_api_version,
+                    "azure_endpoint": self.azure_openai_endpoint,
+                }
+            return AzureOpenAITextVectorizer(
+                model=vectorizer_config.get("model"),
+                api_config=effective_config,
+            )
+
+        return vectorizer_from_dict(vectorizer_config)
 
     def _semantic_cache_vectorizer(self):
         provider = self.selected_embedding_model_provider
@@ -241,6 +283,25 @@ class ChatApp:
             )
 
         return HFTextVectorizer(model="redis/langcache-embed-v1")
+
+    def _initialize_semantic_router(self):
+        try:
+            logger.info("Initializing semantic router")
+            router_config = self._load_router_config("workbench/router.yaml")
+            vectorizer_config = router_config.pop("vectorizer", {})
+            vectorizer = self._build_router_vectorizer(vectorizer_config)
+
+            self.semantic_router = SemanticRouter(
+                vectorizer=vectorizer,
+                redis_url=self.redis_url,
+                overwrite=True,
+                **router_config,
+            )
+            logger.info("Semantic router initialized")
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("Failed to initialize semantic router: %s", exc)
+            self.semantic_router = None
+            raise
 
     def initialize(self):
         if self.credentials_set:
@@ -285,14 +346,11 @@ class ChatApp:
             )
 
         logger.info("Rerankers initialized")
+        self._ensure_reranker_type()
 
         # Init semantic router only if enabled
         if self.use_semantic_router:
-            logger.info("Initializing semantic router")
-            self.semantic_router = SemanticRouter.from_yaml(
-                "workbench/router.yaml", redis_url=self.redis_url, overwrite=True
-            )
-            logger.info("Semantic router initialized")
+            self._initialize_semantic_router()
         else:
             self.semantic_router = None
             logger.info("Semantic router disabled")
@@ -513,9 +571,35 @@ class ChatApp:
 
     def update_semantic_router(self, use_semantic_router: bool):
         self.use_semantic_router = use_semantic_router
+        if self.use_semantic_router:
+            if self.semantic_router is None:
+                try:
+                    self._initialize_semantic_router()
+                except Exception:  # pylint: disable=broad-except
+                    logger.warning(
+                        "Disabling semantic router after initialization failure"
+                    )
+                    self.use_semantic_router = False
+        else:
+            self.semantic_router = None
 
     def update_ragas(self, use_ragas: bool):
         self.use_ragas = use_ragas
+
+    def update_reranker_usage(self, use_rerankers: bool):
+        self.use_rerankers = use_rerankers
+
+    def update_reranker_type(self, reranker_type: str):
+        if reranker_type in self.RERANKERS:
+            self.reranker_type = reranker_type
+
+    def _ensure_reranker_type(self):
+        if not self.RERANKERS:
+            self.reranker_type = None
+            return
+
+        if self.reranker_type not in self.RERANKERS:
+            self.reranker_type = next(iter(self.RERANKERS))
 
     def update_llm(self):
         self.llm = self.get_llm()
@@ -574,7 +658,7 @@ class ChatApp:
         return False
 
     def rerank_results(self, query, results):
-        if not self.use_reranker:
+        if not self.use_rerankers or not self.reranker_type:
             return results, None, None
 
         reranker = self.RERANKERS[self.reranker_type]
